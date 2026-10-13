@@ -1,0 +1,10 @@
+import {readFileSync,writeFileSync} from 'node:fs';
+const source=JSON.parse(readFileSync('dist/server/wrangler.json','utf8'));
+const db=JSON.parse(readFileSync('cloudflare/d1.jsonc','utf8'));
+if(!/^[a-f0-9-]{36}$/.test(db.d1_databases[0].database_id))throw Error('Configurá el Database ID real.');
+source.name='mattu-pedidos';delete source.topLevelName;
+source.main='../dist/server/index.js';source.assets={...source.assets,directory:'../dist/client'};
+source.d1_databases=db.d1_databases.map(({migrations_dir,...binding})=>binding);
+source.keep_vars=true;source.vars={};source.services=[];
+writeFileSync('cloudflare/worker.generated.json',JSON.stringify(source,null,2));
+console.log('Worker preparado para Mattu.ar y D1.');
