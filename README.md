@@ -13,6 +13,8 @@ Sistema interno para ventas mayoristas y piezas por encargo. Diseño marrón, bl
 ## Tecnología y base de datos
 La versión publicada se construyó con React, Vite y Vinext, con rutas de servidor compatibles con Next. No es un proyecto de Vite solamente. Ya incluye un backend de referencia para Cloudflare D1 en `app/api/orders/route.ts`, esquema en `db/schema.ts` y migración SQL en `drizzle/`.
 
+El despliegue en Cloudflare está documentado en [cloudflare/README.md](cloudflare/README.md). La API usa Cloudflare Access y requiere ACCESS_TEAM_DOMAIN y ACCESS_AUD; la identidad local de ChatGPT del starter ya no autoriza la API.
+
 El repositorio no incluye credenciales ni el identificador del despliegue privado existente. No se conecta automáticamente a su base de datos. Para cambiar a Firebase o Supabase, reemplazá el backend y la autenticación; no expongas claves de administración en el frontend.
 
 ## Desarrollo en Windows
