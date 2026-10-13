@@ -5,7 +5,7 @@
     {
       "binding": "DB",
       "database_name": "mattu-pedidos-db",
-      "database_id": "REEMPLAZAR_CON_DATABASE_ID",
+      "database_id": "5a71ec03-c19c-483b-9940-3ee00db38b98",
       "migrations_dir": "../drizzle"
     }
   ]
