@@ -1,37 +1,39 @@
-# Cloudflare D1 para Mattu.ar
+# Despliegue desde el navegador en Cloudflare
 
-Esta configuración administra la base. No es todavía un Worker desplegable.
+La tabla orders ya fue creada manualmente. No ejecutar la migración inicial de nuevo sobre esa misma tabla.
 
-## Crear la base
-En https://dash.cloudflare.com/, abrir D1 SQL database, elegir Create Database y nombrarla mattu-pedidos-db.
-Copiar Database ID y reemplazar REEMPLAZAR_CON_DATABASE_ID en cloudflare/d1.jsonc. El ID no es una contraseña.
+## Workers Builds
+1. Workers & Pages → Create application → Import a repository / Connect GitHub.
+2. Elegir Electreer2005/mattu-pedidos, rama main. Crear un **Worker**, no un sitio estático de Pages.
+3. Nombre del Worker: mattu-pedidos.
+4. Build command: `pnpm run build:cloudflare`.
+5. Deploy command: `pnpm exec wrangler deploy --config cloudflare/worker.generated.json`.
+6. Root directory: raíz del repositorio. Node 22.13 o posterior.
 
-Como alternativa al panel, después de instalar las dependencias, ejecutar en PowerShell:
+El build copia el ID D1 real del archivo cloudflare/d1.jsonc al archivo generado de despliegue. El binding es DB. No escribir ni guardar credenciales en GitHub.
 
-```powershell
-pnpm exec wrangler login
-pnpm exec wrangler d1 create mattu-pedidos-db
-```
+## Cloudflare Access
+La API requiere JWT de Access firmado. Hasta configurar Access y sus variables, responde 401; esto es esperado.
+1. En Zero Trust, elegir un Team domain.
+2. Access → Applications → Add application → Self-hosted.
+3. Proteger el hostname del Worker (o dominio propio) completo, sin restringir la ruta a /api.
+4. Política Allow: incluir únicamente los correos de los empleados autorizados. No usar Everyone ni Bypass.
+5. Configurar One-time PIN si se desea ingresar con código recibido por correo.
+6. Copiar el Application Audience (AUD) y Team domain.
+7. En el Worker → Settings → Variables and Secrets, agregar:
+   - ACCESS_TEAM_DOMAIN: nombre-equipo.cloudflareaccess.com (sin https ni barra final).
+   - ACCESS_AUD: el AUD de la aplicación Access.
+8. Volver a desplegar si el panel lo requiere. El despliegue conserva variables del panel mediante keep_vars.
 
-Usar el panel o la terminal para crear la base, no ambos.
+El código verifica firma RS256, emisor, audiencia y vencimiento. El correo mostrado se extrae del token validado; no acepta cabeceras de usuario ChatGPT ni un correo arbitrario.
 
-## Aplicar el esquema
-Con el ID configurado:
+No se guardan contraseñas de empleados en D1. La política de Access define quién puede entrar; todos los empleados admitidos comparten las órdenes.
 
-```powershell
-pnpm exec wrangler d1 migrations list DB --remote --config cloudflare/d1.jsonc
-pnpm exec wrangler d1 migrations apply DB --remote --config cloudflare/d1.jsonc
-```
+## Comprobación
+Abrir la URL con un correo autorizado, crear un pedido de prueba y verificar que desaparezca el indicador pendiente. Abrir un segundo dispositivo y comprobar su aparición. Luego probar guardar un cambio offline y reconectar. Probar un correo no autorizado.
 
-Esto crea la tabla orders mediante las migraciones del repositorio. No importa pedidos de la versión privada existente.
+La configuración y compilación se verificaron localmente. El despliegue real, Access y funcionamiento entre dispositivos requieren estas comprobaciones en la cuenta del negocio.
 
-## Conectar la aplicación
-Vite todavía usa un ID de prueba para desarrollo local. Crear D1 no conecta automáticamente la aplicación: hay que incorporar el ID real a la configuración de despliegue y conservar el binding DB.
+La caché offline conserva datos en cada dispositivo. Usar equipos de confianza. La app debe abrirse una primera vez con conexión. La sincronización sucede mientras está abierta, cada 15 segundos.
 
-La autenticación actual depende de ChatGPT Sites. Antes de desplegar en una cuenta propia hay que adaptar el acceso de empleados, por ejemplo usando Cloudflare Access y validando JWT en servidor. No confiar en cabeceras de correo enviadas por el navegador.
-
-No ejecutar deploy con esta configuración de administración: no contiene un entrypoint. El siguiente paso es completar el Worker y la autenticación del equipo.
-
-Documentación:
-https://developers.cloudflare.com/d1/get-started/
-https://developers.cloudflare.com/d1/reference/migrations/
+Documentación: https://developers.cloudflare.com/workers/ci-cd/builds/configuration/ y https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/.
