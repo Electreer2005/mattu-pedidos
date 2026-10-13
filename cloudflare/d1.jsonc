@@ -1,0 +1,12 @@
+{
+  "name": "mattu-pedidos",
+  "compatibility_date": "2026-10-13",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mattu-pedidos-db",
+      "database_id": "REEMPLAZAR_CON_DATABASE_ID",
+      "migrations_dir": "../drizzle"
+    }
+  ]
+}
