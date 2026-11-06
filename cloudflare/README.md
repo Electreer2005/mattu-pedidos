@@ -23,7 +23,12 @@ La API requiere JWT de Access firmado. Hasta configurar Access y sus variables, 
 7. En el Worker → Settings → Variables and Secrets, agregar:
    - ACCESS_TEAM_DOMAIN: nombre-equipo.cloudflareaccess.com (sin https ni barra final).
    - ACCESS_AUD: el AUD de la aplicación Access.
+   - RESEND_API_KEY: Secret con la clave API de Resend (mismo proveedor de correos de Mattu).
+   - MAIL_FROM: remitente verificado en Resend, por ejemplo Mattu <cuentas@tu-dominio-verificado>.
+   - PUBLIC_ORIGIN: https://mattu-app.vercel.app (origen de la web pública, sin barra final).
 8. Volver a desplegar si el panel lo requiere. El despliegue conserva variables del panel mediante keep_vars.
+
+Cuando el personal cambia el estado de un pedido asociado a una cuenta de cliente, el Worker envía una notificación transaccional mediante Resend. Si faltan las variables de email, la actualización del pedido sigue funcionando, pero no se envía el aviso.
 
 El código verifica firma RS256, emisor, audiencia y vencimiento. El correo mostrado se extrae del token validado; no acepta cabeceras de usuario ChatGPT ni un correo arbitrario.
 
