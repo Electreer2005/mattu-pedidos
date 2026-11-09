@@ -33,10 +33,12 @@ async function notifyCustomerStatus(order: any) {
   }
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   if (!await getTeamUser()) return Response.json({ error: 'Iniciá sesión para sincronizar.' }, { status: 401 });
+  const includeArchived = new URL(req.url).searchParams.get('includeArchived') === '1';
   const rows = await env.DB!.prepare('SELECT * FROM orders ORDER BY updated_at DESC').all();
-  return Response.json(rows.results.map((row: any) => ({ ...JSON.parse(row.data), revision: row.revision })), {
+  const orders = rows.results.map((row: any) => ({ ...JSON.parse(row.data), revision: row.revision }));
+  return Response.json(includeArchived ? orders : orders.filter((order: any) => !order.deletedAt), {
     headers: { 'Cache-Control': 'no-store' },
   });
 }
@@ -65,6 +67,7 @@ export async function POST(req: Request) {
 
   const previousRow: any = await env.DB!.prepare('SELECT data FROM orders WHERE id=?').bind(order.id).first();
   const previousOrder = previousRow?.data ? JSON.parse(previousRow.data) : null;
+  if (previousOrder?.deletedAt) return Response.json({ error: 'Este pedido está archivado y no puede modificarse desde la sincronización.' }, { status: 410 });
   const timestamp = new Date().toISOString();
   if (order.history.length) order.history[order.history.length - 1].actor = user.email;
   const data = JSON.stringify({ ...order, updatedAt: timestamp, updatedBy: user.email, pending: false });
@@ -99,7 +102,14 @@ export async function DELETE(req: Request) {
   if (typeof body.id !== 'string' || !body.id.trim() || body.id.length > 100) {
     return Response.json({ error: 'Identificador de pedido inválido.' }, { status: 400 });
   }
-  const result = await env.DB!.prepare('DELETE FROM orders WHERE id = ?').bind(body.id).run();
-  if (!result.meta.changes) return Response.json({ error: 'El pedido no existe o ya fue eliminado.' }, { status: 404 });
-  return Response.json({ ok: true });
+  const row: any = await env.DB!.prepare('SELECT data,revision FROM orders WHERE id=?').bind(body.id).first();
+  if (!row) return Response.json({ error: 'El pedido no existe.' }, { status: 404 });
+  const order = JSON.parse(row.data);
+  if (order.deletedAt) return Response.json({ ok: true, archived: true });
+  const timestamp = new Date().toISOString();
+  const archived = { ...order, deletedAt: timestamp, deletedBy: user.email, updatedAt: timestamp, updatedBy: user.email };
+  const result = await env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
+    .bind(JSON.stringify(archived), timestamp, body.id, row.revision).run();
+  if (!result.meta.changes) return Response.json({ error: 'El pedido cambió en otro dispositivo. Actualizá e intentá nuevamente.' }, { status: 409 });
+  return Response.json({ ok: true, archived: true });
 }
