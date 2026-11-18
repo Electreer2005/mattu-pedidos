@@ -33,6 +33,13 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
       tracked = { status: state, quantity: qty, product_id: productId };
     }
 
+    if (!tracked && order.status === 'En elaboración') {
+      statements.push(db.prepare("INSERT INTO inventory_order_lines(order_id,line_key,product_id,quantity,status,created_at,updated_at) VALUES(?,?,?,?,'planned',?,?)").bind(order.id, lineKey, productId, qty, at, at));
+      tracked = { status: 'planned', quantity: qty, product_id: productId };
+    }
+    if (!tracked && ['Listo','Enviado','Entregado'].includes(order.status)) {
+      throw new Error('Antes de terminar o despachar una pieza vinculada, aprobá el pedido y registrá su elaboración.');
+    }
     if (!tracked) continue;
     if (Number(tracked.quantity) !== qty) {
       if (['consumed','produced','dispatched'].includes(tracked.status)) throw new Error('No se puede cambiar la cantidad de una pieza que ya entró en fabricación o despacho.');
