@@ -79,8 +79,9 @@ export async function POST(req: Request) {
   const canonicalTotal = order.items.reduce((sum: number, item: any) => sum + item.qty * item.price, 0);
   if (order.deposit > canonicalTotal) return Response.json({ error: 'La seña supera el total actualizado del catálogo. Ajustá el pago antes de guardar.' }, { status: 409 });
 
-  const previousRow: any = await env.DB!.prepare('SELECT data FROM orders WHERE id=?').bind(order.id).first();
+  const previousRow: any = await env.DB!.prepare('SELECT data,revision FROM orders WHERE id=?').bind(order.id).first();
   const previousOrder = previousRow?.data ? JSON.parse(previousRow.data) : null;
+  if ((body.base === 0 && previousRow) || (body.base !== 0 && (!previousRow || Number(previousRow.revision) !== Number(body.base)))) return Response.json({ error: 'Este pedido cambió en otro dispositivo. Actualizá e intentá nuevamente.' }, { status: 409 });
   if (previousOrder?.deletedAt) return Response.json({ error: 'Este pedido está archivado y no puede modificarse desde la sincronización.' }, { status: 410 });
   const timestamp = new Date().toISOString();
   if (order.history.length) order.history[order.history.length - 1].actor = user.email;
@@ -125,8 +126,16 @@ export async function DELETE(req: Request) {
   if (order.deletedAt) return Response.json({ ok: true, archived: true });
   const timestamp = new Date().toISOString();
   const archived = { ...order, deletedAt: timestamp, deletedBy: user.email, updatedAt: timestamp, updatedBy: user.email };
-  const result = await env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
-    .bind(JSON.stringify(archived), timestamp, body.id, row.revision).run();
+  let result: any;
+  try {
+    const inventoryOps = await inventoryStatements(env.DB!, { ...order, status: 'Cancelado' }, order, user.email, timestamp);
+    const updateOrder = env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
+      .bind(JSON.stringify(archived), timestamp, body.id, row.revision);
+    const batchResults = await env.DB!.batch([...inventoryOps, updateOrder]);
+    result = batchResults[batchResults.length - 1];
+  } catch (error: any) {
+    return Response.json({ error: error?.message || 'No se pudo archivar el pedido.' }, { status: 409 });
+  }
   if (!result.meta.changes) return Response.json({ error: 'El pedido cambió en otro dispositivo. Actualizá e intentá nuevamente.' }, { status: 409 });
   return Response.json({ ok: true, archived: true });
 }
