@@ -76,6 +76,8 @@ export async function POST(req: Request) {
     if (!Number.isFinite(catalogPrice) || catalogPrice <= 0) return Response.json({ error: 'El producto vinculado no tiene un precio válido en el catálogo.' }, { status: 409 });
     item.price = catalogPrice;
   }
+  const canonicalTotal = order.items.reduce((sum: number, item: any) => sum + item.qty * item.price, 0);
+  if (order.deposit > canonicalTotal) return Response.json({ error: 'La seña supera el total actualizado del catálogo. Ajustá el pago antes de guardar.' }, { status: 409 });
 
   const previousRow: any = await env.DB!.prepare('SELECT data FROM orders WHERE id=?').bind(order.id).first();
   const previousOrder = previousRow?.data ? JSON.parse(previousRow.data) : null;
