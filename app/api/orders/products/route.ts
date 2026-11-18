@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { getTeamUser } from '../../../../team-auth';
+import { getTeamUser } from '../../../team-auth';
 
 export async function GET() {
   if (!await getTeamUser()) return Response.json({ error: 'Iniciá sesión.' }, { status: 401 });
