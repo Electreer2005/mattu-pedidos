@@ -32,7 +32,8 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
     }
 
     if (!tracked) continue;
-    if (order.status === 'Cancelado' && ['reserved','planned','consumed','produced'].includes(tracked.status)) {
+    if (order.status === 'Cancelado' && ['consumed','produced'].includes(tracked.status)) throw new Error('Este pedido ya consumió materiales o produjo unidades. No se puede cancelar automáticamente; revisá el inventario y registrá un ajuste manual.');
+    if (order.status === 'Cancelado' && ['reserved','planned'].includes(tracked.status)) {
       if (tracked.status === 'reserved') {
         statements.push(db.prepare('UPDATE inventory_finished_stock SET reserved=MAX(0,reserved-?),updated_at=? WHERE product_id=?').bind(tracked.quantity, at, productId));
         statements.push(db.prepare("INSERT INTO inventory_movements(id,entity_type,entity_id,movement_type,quantity,reference_type,reference_id,note,created_by,created_at) VALUES(?,'finished_product',?,'release',?,'order',?,?,?,?)").bind(id(), productId, tracked.quantity, order.id, 'Liberación por cancelación ' + (order.number || order.id), actor, at));
@@ -67,6 +68,7 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
       tracked.status = 'produced';
     }
 
+    if (['Enviado','Entregado'].includes(order.status) && ['planned','consumed'].includes(tracked.status)) throw new Error('No se puede despachar: el producto todavía no figura como terminado. Pasá el pedido por Listo primero.');
     if (['Enviado','Entregado'].includes(order.status) && ['reserved','produced'].includes(tracked.status)) {
       if (tracked.status === 'reserved') {
         statements.push(db.prepare('UPDATE inventory_finished_stock SET on_hand=on_hand-?,reserved=reserved-?,updated_at=? WHERE product_id=? AND on_hand>=? AND reserved>=?').bind(tracked.quantity, tracked.quantity, at, productId, tracked.quantity, tracked.quantity));
