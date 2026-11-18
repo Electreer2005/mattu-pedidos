@@ -34,6 +34,21 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
     }
 
     if (!tracked) continue;
+    if (Number(tracked.quantity) !== qty) {
+      if (['consumed','produced','dispatched'].includes(tracked.status)) throw new Error('No se puede cambiar la cantidad de una pieza que ya entró en fabricación o despacho.');
+      const delta = qty - Number(tracked.quantity);
+      if (tracked.status === 'reserved' && delta > 0) {
+        const stock = await db.prepare('SELECT on_hand,reserved FROM inventory_finished_stock WHERE product_id=?').bind(productId).first();
+        if (Number(stock?.on_hand || 0) - Number(stock?.reserved || 0) < delta) throw new Error('No hay unidades disponibles para ampliar la reserva de este producto.');
+        statements.push(db.prepare('UPDATE inventory_finished_stock SET reserved=reserved+?,updated_at=? WHERE product_id=?').bind(delta, at, productId));
+        statements.push(db.prepare("INSERT INTO inventory_movements(id,entity_type,entity_id,movement_type,quantity,reference_type,reference_id,note,created_by,created_at) VALUES(?,'finished_product',?,'reservation',?,'order',?,?,?,?)").bind(id(), productId, delta, order.id, 'Ampliación de reserva ' + (order.number || order.id), actor, at));
+      } else if (tracked.status === 'reserved' && delta < 0) {
+        statements.push(db.prepare('UPDATE inventory_finished_stock SET reserved=MAX(0,reserved-?),updated_at=? WHERE product_id=?').bind(-delta, at, productId));
+        statements.push(db.prepare("INSERT INTO inventory_movements(id,entity_type,entity_id,movement_type,quantity,reference_type,reference_id,note,created_by,created_at) VALUES(?,'finished_product',?,'release',?,'order',?,?,?,?)").bind(id(), productId, -delta, order.id, 'Reducción de reserva ' + (order.number || order.id), actor, at));
+      }
+      statements.push(db.prepare('UPDATE inventory_order_lines SET quantity=?,updated_at=? WHERE order_id=? AND line_key=?').bind(qty, at, order.id, lineKey));
+      tracked.quantity = qty;
+    }
     if (order.status === 'Cancelado' && ['consumed','produced'].includes(tracked.status)) throw new Error('Este pedido ya consumió materiales o produjo unidades. No se puede cancelar automáticamente; revisá el inventario y registrá un ajuste manual.');
     if (order.status === 'Cancelado' && ['reserved','planned'].includes(tracked.status)) {
       if (tracked.status === 'reserved') {
