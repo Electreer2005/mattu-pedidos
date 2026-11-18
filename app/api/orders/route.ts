@@ -94,8 +94,10 @@ export async function POST(req: Request) {
     const orderWrite = body.base === 0
       ? env.DB!.prepare('INSERT INTO orders(id,data,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(id) DO NOTHING').bind(order.id, data, timestamp)
       : env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?').bind(data, timestamp, order.id, body.base);
-    const batchResults = await env.DB!.batch([...inventoryOps, orderWrite]);
-    result = batchResults[batchResults.length - 1];
+    const expectedRevision = body.base === 0 ? 1 : Number(body.base) + 1;
+    const revisionGuard = env.DB!.prepare('INSERT INTO inventory_order_sync_guard(order_id,revision) VALUES(?,?) ON CONFLICT(order_id) DO UPDATE SET revision=excluded.revision').bind(order.id, expectedRevision);
+    const batchResults = await env.DB!.batch([orderWrite, revisionGuard, ...inventoryOps]);
+    result = batchResults[0];
   } catch (error: any) {
     return Response.json({ error: error?.message || 'No se pudo actualizar el inventario del pedido.' }, { status: 409 });
   }
@@ -131,8 +133,9 @@ export async function DELETE(req: Request) {
     const inventoryOps = await inventoryStatements(env.DB!, { ...order, status: 'Cancelado' }, order, user.email, timestamp);
     const updateOrder = env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
       .bind(JSON.stringify(archived), timestamp, body.id, row.revision);
-    const batchResults = await env.DB!.batch([...inventoryOps, updateOrder]);
-    result = batchResults[batchResults.length - 1];
+    const revisionGuard = env.DB!.prepare('INSERT INTO inventory_order_sync_guard(order_id,revision) VALUES(?,?) ON CONFLICT(order_id) DO UPDATE SET revision=excluded.revision').bind(body.id, Number(row.revision) + 1);
+    const batchResults = await env.DB!.batch([updateOrder, revisionGuard, ...inventoryOps]);
+    result = batchResults[0];
   } catch (error: any) {
     return Response.json({ error: error?.message || 'No se pudo archivar el pedido.' }, { status: 409 });
   }
