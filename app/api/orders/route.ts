@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { getTeamUser } from '../../team-auth';
+import { inventoryStatements } from '../../../lib/inventory';
 
 const allowedStatuses = ['Recibido', 'Presupuestando', 'Aprobado', 'En elaboración', 'Preparando', 'Listo', 'Enviado', 'Entregado', 'Cancelado'];
 
@@ -65,6 +66,17 @@ export async function POST(req: Request) {
     return Response.json({ error: 'Revisá los datos de la orden.' }, { status: 400 });
   }
 
+  // Product-linked lines always use the canonical catalog price, never a browser-supplied amount.
+  for (const item of order.items) {
+    if (!item.productId) continue;
+    const productRow: any = await env.DB!.prepare('SELECT data FROM catalog_products WHERE id=? AND active=1').bind(item.productId).first();
+    if (!productRow) return Response.json({ error: 'Uno de los productos vinculados ya no está disponible.' }, { status: 409 });
+    const product = JSON.parse(productRow.data);
+    const catalogPrice = Number(product.price);
+    if (!Number.isFinite(catalogPrice) || catalogPrice <= 0) return Response.json({ error: 'El producto vinculado no tiene un precio válido en el catálogo.' }, { status: 409 });
+    item.price = catalogPrice;
+  }
+
   const previousRow: any = await env.DB!.prepare('SELECT data FROM orders WHERE id=?').bind(order.id).first();
   const previousOrder = previousRow?.data ? JSON.parse(previousRow.data) : null;
   if (previousOrder?.deletedAt) return Response.json({ error: 'Este pedido está archivado y no puede modificarse desde la sincronización.' }, { status: 410 });
@@ -74,12 +86,15 @@ export async function POST(req: Request) {
   if (data.length > 150000) return Response.json({ error: 'Orden demasiado grande' }, { status: 400 });
 
   let result: any;
-  if (body.base === 0) {
-    result = await env.DB!.prepare('INSERT INTO orders(id,data,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(id) DO NOTHING')
-      .bind(order.id, data, timestamp).run();
-  } else {
-    result = await env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
-      .bind(data, timestamp, order.id, body.base).run();
+  try {
+    const inventoryOps = await inventoryStatements(env.DB!, order, previousOrder, user.email, timestamp);
+    const orderWrite = body.base === 0
+      ? env.DB!.prepare('INSERT INTO orders(id,data,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(id) DO NOTHING').bind(order.id, data, timestamp)
+      : env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?').bind(data, timestamp, order.id, body.base);
+    const batchResults = await env.DB!.batch([...inventoryOps, orderWrite]);
+    result = batchResults[batchResults.length - 1];
+  } catch (error: any) {
+    return Response.json({ error: error?.message || 'No se pudo actualizar el inventario del pedido.' }, { status: 409 });
   }
 
   if (!result.meta.changes) {
