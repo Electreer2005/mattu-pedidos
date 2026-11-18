@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { getTeamUser } from '../../team-auth';
+import { inventoryStatements } from '../../../lib/inventory';
 
 const allowedStatuses = ['Recibido', 'Presupuestando', 'Aprobado', 'En elaboración', 'Preparando', 'Listo', 'Enviado', 'Entregado', 'Cancelado'];
 
@@ -37,7 +38,7 @@ export async function GET(req: Request) {
   if (!await getTeamUser()) return Response.json({ error: 'Iniciá sesión para sincronizar.' }, { status: 401 });
   const includeArchived = new URL(req.url).searchParams.get('includeArchived') === '1';
   const rows = await env.DB!.prepare('SELECT * FROM orders ORDER BY updated_at DESC').all();
-  const orders = rows.results.map((row: any) => ({ ...JSON.parse(row.data), revision: row.revision }));
+  const orders = rows.results.map((row: any) => { const data = JSON.parse(row.data); delete data.inventorySyncToken; return { ...data, revision: row.revision }; });
   return Response.json(includeArchived ? orders : orders.filter((order: any) => !order.deletedAt), {
     headers: { 'Cache-Control': 'no-store' },
   });
@@ -65,21 +66,40 @@ export async function POST(req: Request) {
     return Response.json({ error: 'Revisá los datos de la orden.' }, { status: 400 });
   }
 
-  const previousRow: any = await env.DB!.prepare('SELECT data FROM orders WHERE id=?').bind(order.id).first();
+  // Product-linked lines always use the canonical catalog price, never a browser-supplied amount.
+  for (const item of order.items) {
+    if (!item.productId) continue;
+    const productRow: any = await env.DB!.prepare('SELECT data FROM catalog_products WHERE id=? AND active=1').bind(item.productId).first();
+    if (!productRow) return Response.json({ error: 'Uno de los productos vinculados ya no está disponible.' }, { status: 409 });
+    const product = JSON.parse(productRow.data);
+    const catalogPrice = Number(product.price);
+    if (!Number.isFinite(catalogPrice) || catalogPrice <= 0) return Response.json({ error: 'El producto vinculado no tiene un precio válido en el catálogo.' }, { status: 409 });
+    item.price = catalogPrice;
+  }
+  const canonicalTotal = order.items.reduce((sum: number, item: any) => sum + item.qty * item.price, 0);
+  if (order.deposit > canonicalTotal) return Response.json({ error: 'La seña supera el total actualizado del catálogo. Ajustá el pago antes de guardar.' }, { status: 409 });
+
+  const previousRow: any = await env.DB!.prepare('SELECT data,revision FROM orders WHERE id=?').bind(order.id).first();
   const previousOrder = previousRow?.data ? JSON.parse(previousRow.data) : null;
+  if ((body.base === 0 && previousRow) || (body.base !== 0 && (!previousRow || Number(previousRow.revision) !== Number(body.base)))) return Response.json({ error: 'Este pedido cambió en otro dispositivo. Actualizá e intentá nuevamente.' }, { status: 409 });
   if (previousOrder?.deletedAt) return Response.json({ error: 'Este pedido está archivado y no puede modificarse desde la sincronización.' }, { status: 410 });
   const timestamp = new Date().toISOString();
+  const inventorySyncToken = crypto.randomUUID();
   if (order.history.length) order.history[order.history.length - 1].actor = user.email;
-  const data = JSON.stringify({ ...order, updatedAt: timestamp, updatedBy: user.email, pending: false });
+  const data = JSON.stringify({ ...order, inventorySyncToken, updatedAt: timestamp, updatedBy: user.email, pending: false });
   if (data.length > 150000) return Response.json({ error: 'Orden demasiado grande' }, { status: 400 });
 
   let result: any;
-  if (body.base === 0) {
-    result = await env.DB!.prepare('INSERT INTO orders(id,data,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(id) DO NOTHING')
-      .bind(order.id, data, timestamp).run();
-  } else {
-    result = await env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
-      .bind(data, timestamp, order.id, body.base).run();
+  try {
+    const inventoryOps = await inventoryStatements(env.DB!, order, previousOrder, user.email, timestamp);
+    const orderWrite = body.base === 0
+      ? env.DB!.prepare('INSERT INTO orders(id,data,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(id) DO NOTHING').bind(order.id, data, timestamp)
+      : env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?').bind(data, timestamp, order.id, body.base);
+    const revisionGuard = env.DB!.prepare('INSERT INTO inventory_order_sync_guard(order_id,token) VALUES(?,?) ON CONFLICT(order_id) DO UPDATE SET token=excluded.token').bind(order.id, inventorySyncToken);
+    const batchResults = await env.DB!.batch([orderWrite, revisionGuard, ...inventoryOps]);
+    result = batchResults[0];
+  } catch (error: any) {
+    return Response.json({ error: error?.message || 'No se pudo actualizar el inventario del pedido.' }, { status: 409 });
   }
 
   if (!result.meta.changes) {
@@ -107,9 +127,19 @@ export async function DELETE(req: Request) {
   const order = JSON.parse(row.data);
   if (order.deletedAt) return Response.json({ ok: true, archived: true });
   const timestamp = new Date().toISOString();
-  const archived = { ...order, deletedAt: timestamp, deletedBy: user.email, updatedAt: timestamp, updatedBy: user.email };
-  const result = await env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
-    .bind(JSON.stringify(archived), timestamp, body.id, row.revision).run();
+  const inventorySyncToken = crypto.randomUUID();
+  const archived = { ...order, inventorySyncToken, deletedAt: timestamp, deletedBy: user.email, updatedAt: timestamp, updatedBy: user.email };
+  let result: any;
+  try {
+    const inventoryOps = await inventoryStatements(env.DB!, { ...order, status: 'Cancelado' }, order, user.email, timestamp);
+    const updateOrder = env.DB!.prepare('UPDATE orders SET data=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?')
+      .bind(JSON.stringify(archived), timestamp, body.id, row.revision);
+    const revisionGuard = env.DB!.prepare('INSERT INTO inventory_order_sync_guard(order_id,token) VALUES(?,?) ON CONFLICT(order_id) DO UPDATE SET token=excluded.token').bind(body.id, inventorySyncToken);
+    const batchResults = await env.DB!.batch([updateOrder, revisionGuard, ...inventoryOps]);
+    result = batchResults[0];
+  } catch (error: any) {
+    return Response.json({ error: error?.message || 'No se pudo archivar el pedido.' }, { status: 409 });
+  }
   if (!result.meta.changes) return Response.json({ error: 'El pedido cambió en otro dispositivo. Actualizá e intentá nuevamente.' }, { status: 409 });
   return Response.json({ ok: true, archived: true });
 }
