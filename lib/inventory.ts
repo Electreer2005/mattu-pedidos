@@ -6,6 +6,7 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
   const statements: any[] = [];
   const lines = Array.isArray(order.items) ? order.items : [];
   const oldLines = new Map<string, any>();
+  const seenKeys = new Set<string>();
   const existing = await db.prepare('SELECT * FROM inventory_order_lines WHERE order_id=?').bind(order.id).all();
   for (const row of existing.results || []) oldLines.set(row.line_key, row);
 
@@ -14,6 +15,7 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
     const productId = typeof line.productId === 'string' ? line.productId : '';
     if (!productId) continue; // Free-text/custom work never consumes stock automatically.
     const lineKey = typeof line.id === 'string' && line.id ? line.id : productId + ':' + index;
+    seenKeys.add(lineKey);
     let tracked = oldLines.get(lineKey);
     const qty = Number(line.qty);
     if (!Number.isFinite(qty) || qty <= 0) continue;
@@ -60,7 +62,8 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
       tracked.status = 'consumed';
     }
 
-    if (order.status === 'Listo' && ['planned','consumed'].includes(tracked.status)) {
+    if (order.status === 'Listo' && tracked.status === 'planned') throw new Error('Este producto requiere pasar por En elaboración antes de marcar el pedido como Listo.');
+    if (order.status === 'Listo' && tracked.status === 'consumed') {
       const stock = await db.prepare('SELECT on_hand,reserved FROM inventory_finished_stock WHERE product_id=?').bind(productId).first();
       statements.push(db.prepare('INSERT INTO inventory_finished_stock(product_id,on_hand,reserved,updated_at) VALUES(?,?,0,?) ON CONFLICT(product_id) DO UPDATE SET on_hand=inventory_finished_stock.on_hand+excluded.on_hand,updated_at=excluded.updated_at').bind(productId, qty, at));
       statements.push(db.prepare("INSERT INTO inventory_movements(id,entity_type,entity_id,movement_type,quantity,reference_type,reference_id,note,created_by,created_at) VALUES(?,'finished_product',?,'production',?,'order',?,?,?,?)").bind(id(), productId, qty, order.id, 'Producción terminada · pedido ' + (order.number || order.id), actor, at));
@@ -78,6 +81,20 @@ export async function inventoryStatements(db: D1, order: any, previous: any, act
       statements.push(db.prepare("INSERT INTO inventory_movements(id,entity_type,entity_id,movement_type,quantity,reference_type,reference_id,note,created_by,created_at) VALUES(?,'finished_product',?,'dispatch',?,'order',?,?,?,?)").bind(id(), productId, tracked.quantity, order.id, 'Salida por pedido ' + (order.number || order.id), actor, at));
       statements.push(db.prepare("UPDATE inventory_order_lines SET status='dispatched',updated_at=? WHERE order_id=? AND line_key=? AND status IN ('reserved','produced')").bind(at, order.id, lineKey));
     }
+  }
+
+  // Removed lines release only stock that is still reserved/planned. Material already
+  // consumed or goods already produced/dispatched require a deliberate manual adjustment.
+  for (const [lineKey, tracked] of oldLines) {
+    if (seenKeys.has(lineKey) || ['released','dispatched'].includes(tracked.status)) continue;
+    if (['consumed','produced'].includes(tracked.status)) {
+      throw new Error('No se puede quitar una pieza que ya está en fabricación o terminada. Registrá primero el ajuste correspondiente.');
+    }
+    if (tracked.status === 'reserved') {
+      statements.push(db.prepare('UPDATE inventory_finished_stock SET reserved=MAX(0,reserved-?),updated_at=? WHERE product_id=?').bind(tracked.quantity, at, tracked.product_id));
+      statements.push(db.prepare("INSERT INTO inventory_movements(id,entity_type,entity_id,movement_type,quantity,reference_type,reference_id,note,created_by,created_at) VALUES(?,'finished_product',?,'release',?,'order',?,?,?,?)").bind(id(), tracked.product_id, tracked.quantity, order.id, 'Liberación por edición de pedido ' + (order.number || order.id), actor, at));
+    }
+    statements.push(db.prepare("UPDATE inventory_order_lines SET status='released',updated_at=? WHERE order_id=? AND line_key=?").bind(at, order.id, lineKey));
   }
   return statements;
 }
